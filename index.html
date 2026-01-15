@@ -30,7 +30,7 @@
 
         /* Canvas Effects */
         canvas {
-            box-shadow: 0 0 20px rgba(0, 243, 255, 0.1);
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
             border-radius: 12px;
             background: radial-gradient(circle at center, #0a0a1a 0%, #000000 100%);
         }
@@ -64,19 +64,6 @@
             border-radius: 16px;
         }
 
-        /* Animations */
-        @keyframes pulse-ring {
-            0% { transform: scale(0.8); opacity: 0.5; }
-            100% { transform: scale(1.4); opacity: 0; }
-        }
-
-        .pulse-dot {
-            position: absolute;
-            border-radius: 50%;
-            animation: pulse-ring 1.5s infinite;
-            pointer-events: none;
-        }
-
         /* Selection Bubble */
         .choice-bubble {
             animation: popIn 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
@@ -85,6 +72,11 @@
         @keyframes popIn {
             from { transform: scale(0) translateY(10px); opacity: 0; }
             to { transform: scale(1) translateY(0); opacity: 1; }
+        }
+
+        select option {
+            background-color: #050510;
+            color: #e0e0e0;
         }
     </style>
 </head>
@@ -102,12 +94,12 @@
             <div class="text-xs text-gray-500 uppercase tracking-widest mb-1">SCORES</div>
             <div class="flex gap-3 text-sm font-bold">
                 <div class="flex flex-col items-center">
-                    <span class="text-[10px] text-cyan-400">P1 SNAKE</span>
+                    <span class="text-[10px] text-cyan-400" id="p1Label">P1 SNAKE</span>
                     <span id="scoreP1" class="text-xl leading-none">-</span>
                 </div>
                 <div class="w-px h-8 bg-gray-700"></div>
                 <div class="flex flex-col items-center">
-                    <span class="text-[10px] text-pink-400">P2 SNAKE</span>
+                    <span class="text-[10px] text-pink-400" id="p2Label">P2 SNAKE</span>
                     <span id="scoreP2" class="text-xl leading-none">-</span>
                 </div>
             </div>
@@ -165,13 +157,23 @@
         <!-- Action Buttons -->
         <div class="grid grid-cols-2 gap-3">
             <button id="undoBtn" class="btn-neon bg-white/5 hover:bg-white/10 border border-white/10 text-gray-300 py-3 rounded-lg text-sm font-semibold flex items-center justify-center gap-2 disabled:opacity-30 disabled:cursor-not-allowed">
-                <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"></path></svg>
                 UNDO
             </button>
             <button id="resetBtn" class="btn-neon bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 text-red-300 py-3 rounded-lg text-sm font-semibold flex items-center justify-center gap-2">
-                <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
                 RESET
             </button>
+
+            <!-- Mode Selector -->
+            <div class="col-span-2 relative">
+                <select id="modeSelect" class="w-full bg-white/5 hover:bg-white/10 border border-white/10 text-gray-300 py-3 rounded-lg text-sm font-semibold focus:outline-none appearance-none text-center cursor-pointer transition-colors">
+                    <option value="pvp">MODE: PLAYER VS PLAYER</option>
+                    <option value="pvai">MODE: PLAYER VS AI</option>
+                </select>
+                <!-- Custom arrow for better look -->
+                <div class="absolute right-4 top-1/2 transform -translate-y-1/2 pointer-events-none text-gray-500">
+                    <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M19 9l-7 7-7-7"></path></svg>
+                </div>
+            </div>
         </div>
 
         <div class="text-[10px] text-gray-600 text-center mt-1">
@@ -207,14 +209,28 @@ let canvas, ctx;
 let canvasSize, cellSize, padding;
 let dpr = window.devicePixelRatio || 1;
 
+// Colors
+const COLOR_SNAKE = '#00f3ff'; // Cyan
+const COLOR_HUNTER = '#ff00ff'; // Magenta/Pink
+
+// AI Configuration
+let playVsAI = false;           // Toggled by selector
+let aiRole = "Hunter";          // "Snake" or "Hunter" (Dynamic based on round)
+let aiThinking = false;
+const AI_TIME_MS = 1000;        // 1 second thinking time
+const AI_MAX_ITERS = 20000;     // 20k iterations
+
 // Game State
 let path = [];     // Array of vertex indices
 let used = new Set(); // Set of used vertex indices
+let nodeData = {}; // Map v -> { role: 'Snake'|'Hunter', turn: int }
 let history = [];  // Undo stack
 let round = 1;     // 1 or 2
 let turnRole = 'Snake'; // 'Snake' (Maximizer) or 'Hunter' (Minimizer)
 let isRoundActive = true;
 let startPick = null; // First vertex of the first move
+let moveCount = 0; // Increments with every successful move
+let rafId = null; // Animation frame ID
 
 // UI State
 let pendingAmbiguity = null; // {v, r, c} if user clicks a node connected to both ends
@@ -261,6 +277,12 @@ function initGame() {
         resetMatch();
     });
 
+    // Mode Selector Listener
+    document.getElementById('modeSelect').addEventListener('change', (e) => {
+        playVsAI = (e.target.value === 'pvai');
+        resetMatch();
+    });
+
     resizeCanvas();
     resetMatch();
 }
@@ -268,8 +290,11 @@ function initGame() {
 function resizeCanvas() {
     const rect = canvas.getBoundingClientRect();
     canvasSize = rect.width;
-    canvas.width = canvasSize * dpr;
-    canvas.height = canvasSize * dpr;
+    canvas.width = Math.floor(canvasSize * dpr);
+    canvas.height = Math.floor(canvasSize * dpr);
+    
+    // Reset transform to prevent accumulation issues
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.scale(dpr, dpr);
     
     padding = canvasSize * 0.1; // 10% padding
@@ -288,21 +313,332 @@ function resetMatch() {
     round = 1;
     document.getElementById('scoreP1').textContent = '-';
     document.getElementById('scoreP2').textContent = '-';
+    
+    // Reset Label Names based on mode
+    if (playVsAI) {
+        document.getElementById('p1Label').textContent = "PLAYER SNAKE";
+        document.getElementById('p2Label').textContent = "AI SNAKE";
+    } else {
+        document.getElementById('p1Label').textContent = "P1 SNAKE";
+        document.getElementById('p2Label').textContent = "P2 SNAKE";
+    }
+
     startRound();
 }
 
 function startRound() {
     path = [];
     used = new Set();
+    nodeData = {};
     history = [];
     startPick = null;
     turnRole = 'Snake';
+    moveCount = 0;
     isRoundActive = true;
     closeMenu();
     hideOverlay();
+    
+    // Determine AI Role if in PvAI mode
+    if (playVsAI) {
+        // Round 1: Player (P1) is Snake, AI (P2) is Hunter
+        // Round 2: AI (P2) is Snake, Player (P1) is Hunter
+        aiRole = (round === 1) ? 'Hunter' : 'Snake';
+    }
+
     updateUI();
     draw();
+    
+    // Attempt AI move if AI is Snake (starts first in Round 2)
+    setTimeout(() => maybeAIMove(), 100);
 }
+
+// --- AI LOGIC (MCTS) ---
+
+function maybeAIMove(force=false) {
+    if (!playVsAI && !force) return;
+    if (!isRoundActive) return;
+    if (aiThinking) return;
+    if (!force && turnRole !== aiRole) return;
+
+    // Small delay for UX
+    setTimeout(() => aiMakeMove(), 50);
+}
+
+function aiMakeMove() {
+    if (!isRoundActive) return;
+    aiThinking = true;
+
+    // Build a compact state snapshot
+    const state = exportStateForAI();
+
+    // Run MCTS to choose a move
+    const move = mctsChooseMove(state, AI_TIME_MS, AI_MAX_ITERS);
+
+    aiThinking = false;
+    if (!move) return;
+
+    // Apply chosen move to the real game
+    applyAIMoveToGame(move);
+}
+
+function exportStateForAI() {
+    let mask = 0n;
+    for (const v of used) mask |= (1n << BigInt(v));
+
+    return {
+        N,
+        path: [...path],       
+        mask,                  
+        turn: turnRole,        
+        startPick: startPick,  
+    };
+}
+
+function isBitSet(mask, v) {
+    return (mask & (1n << BigInt(v))) !== 0n;
+}
+
+function setBit(mask, v) {
+    return mask | (1n << BigInt(v));
+}
+
+function aiLegalMoves(st) {
+    const moves = [];
+
+    // If no snake yet: must place first edge
+    if (st.path.length === 0) {
+        if (st.startPick !== null) {
+            // If user already picked a start, AI completes the edge
+            const nbs = getNeighbors(st.startPick);
+            for (const b of nbs) {
+                if (!isBitSet(st.mask, b)) {
+                    moves.push({ kind: "init", a: st.startPick, b });
+                }
+            }
+        } else {
+            // AI chooses a fresh edge from scratch.
+            for (let a = 0; a < st.N * st.N; a++) {
+                if (isBitSet(st.mask, a)) continue;
+                const nbs = getNeighbors(a);
+                for (const b of nbs) {
+                    if (a < b && !isBitSet(st.mask, b)) {
+                        moves.push({ kind: "init", a, b });
+                    }
+                }
+            }
+        }
+        return moves;
+    }
+
+    const head = st.path[0];
+    const tail = st.path[st.path.length - 1];
+
+    // extend head
+    for (const nb of getNeighbors(head)) {
+        if (!isBitSet(st.mask, nb)) {
+            moves.push({ kind: "extend", end: "head", v: nb });
+        }
+    }
+
+    // extend tail
+    for (const nb of getNeighbors(tail)) {
+        if (!isBitSet(st.mask, nb)) {
+            moves.push({ kind: "extend", end: "tail", v: nb });
+        }
+    }
+
+    return moves;
+}
+
+function aiApplyMove(st, mv) {
+    const nxt = {
+        N: st.N,
+        path: [...st.path],
+        mask: st.mask,
+        turn: st.turn === "Snake" ? "Hunter" : "Snake",
+        startPick: st.startPick
+    };
+
+    if (mv.kind === "pickStart") {
+        nxt.startPick = mv.v;
+        nxt.turn = st.turn; 
+        return nxt;
+    }
+
+    if (mv.kind === "init") {
+        nxt.path = [mv.a, mv.b];
+        nxt.mask = setBit(setBit(nxt.mask, mv.a), mv.b);
+        nxt.startPick = null;
+        return nxt;
+    }
+
+    // extend move
+    if (mv.end === "head") nxt.path.unshift(mv.v);
+    else nxt.path.push(mv.v);
+
+    nxt.mask = setBit(nxt.mask, mv.v);
+    return nxt;
+}
+
+function aiTerminal(st) {
+    if (st.path.length <= 1) return false;
+    const head = st.path[0];
+    const tail = st.path[st.path.length - 1];
+
+    let headFree = false;
+    for (const nb of getNeighbors(head)) {
+        if (!isBitSet(st.mask, nb)) { headFree = true; break; }
+    }
+    let tailFree = false;
+    for (const nb of getNeighbors(tail)) {
+        if (!isBitSet(st.mask, nb)) { tailFree = true; break; }
+    }
+    return !headFree && !tailFree;
+}
+
+function snakeLength(st) {
+    return Math.max(0, st.path.length - 1);
+}
+
+// MCTS Node
+class MCTSNode {
+    constructor(state, parent=null, move=null, rootPlayer="Snake") {
+        this.state = state;
+        this.parent = parent;
+        this.move = move;
+        this.children = [];
+        this.untried = aiLegalMoves(state);
+        this.visits = 0;
+        this.total = 0;           
+        this.rootPlayer = rootPlayer;
+    }
+}
+
+function uctScore(child, parentVisits, c=1.414) {
+    if (child.visits === 0) return Infinity;
+    return (child.total / child.visits) + c * Math.sqrt(Math.log(parentVisits) / child.visits);
+}
+
+function rewardFromRootPerspective(rootPlayer, finalLength) {
+    // Snake wants MAX length, Hunter wants MIN length
+    return (rootPlayer === "Snake") ? finalLength : -finalLength;
+}
+
+function rollout(state, rootPlayer) {
+    let st = state;
+    let guard = 0;
+
+    while (!aiTerminal(st) && guard < 2000) {
+        guard++;
+        const moves = aiLegalMoves(st);
+        if (moves.length === 0) break;
+
+        // Heuristic rollout: prefer high degree for Snake, low degree for Hunter
+        const isSnakeTurn = (st.turn === "Snake");
+        let best = null;
+        let bestScore = -1e9;
+        
+        const samples = Math.min(6, moves.length);
+        
+        for (let k = 0; k < samples; k++) {
+            const mv = moves[(Math.random() * moves.length) | 0];
+            let score = Math.random(); 
+
+            if (mv.kind === "extend") {
+                const nbs = getNeighbors(mv.v);
+                let freeDeg = 0;
+                for (const nb of nbs) if (!isBitSet(st.mask, nb)) freeDeg++;
+                
+                if (isSnakeTurn) score += freeDeg * 0.5;
+                else score += (4 - freeDeg) * 0.5;
+            }
+            
+            if (score > bestScore) {
+                bestScore = score;
+                best = mv;
+            }
+        }
+
+        st = aiApplyMove(st, best);
+    }
+
+    const L = snakeLength(st);
+    return rewardFromRootPerspective(rootPlayer, L);
+}
+
+function mctsChooseMove(rootState, timeMs=1000, maxIters=20000) {
+    const legal = aiLegalMoves(rootState);
+    if (legal.length === 0) return null;
+    if (legal.length === 1) return legal[0];
+
+    const rootPlayer = rootState.turn;
+    const root = new MCTSNode(rootState, null, null, rootPlayer);
+
+    const t0 = performance.now();
+    let iters = 0;
+
+    while ((performance.now() - t0) < timeMs && iters < maxIters) {
+        iters++;
+
+        // 1) Selection
+        let node = root;
+        while (node.untried.length === 0 && node.children.length > 0) {
+            let best = null;
+            let bestU = -1e9;
+            for (const ch of node.children) {
+                const u = uctScore(ch, node.visits + 1);
+                if (u > bestU) { bestU = u; best = ch; }
+            }
+            node = best;
+        }
+
+        // 2) Expansion
+        if (node.untried.length > 0) {
+            const mv = node.untried.pop(); 
+            const childState = aiApplyMove(node.state, mv);
+            const child = new MCTSNode(childState, node, mv, rootPlayer);
+            node.children.push(child);
+            node = child;
+        }
+
+        // 3) Simulation
+        const r = rollout(node.state, rootPlayer);
+
+        // 4) Backpropagation
+        while (node) {
+            node.visits++;
+            node.total += r;
+            node = node.parent;
+        }
+    }
+
+    // Pick most visited
+    root.children.sort((a,b) => b.visits - a.visits);
+    return root.children[0]?.move ?? null;
+}
+
+function applyAIMoveToGame(mv) {
+    if (!isRoundActive) return;
+
+    if (mv.kind === "pickStart") {
+        startPick = mv.v;
+        draw();
+        setTimeout(() => maybeAIMove(), 50);
+        return;
+    }
+
+    if (mv.kind === "init") {
+        executeMove([mv.a, mv.b], 'Hunter');
+        return;
+    }
+
+    if (mv.kind === "extend") {
+        executeExtension(mv.v, mv.end);
+        return;
+    }
+}
+
+// --- End AI Logic ---
 
 function checkGameState() {
     // Check legal moves
@@ -332,10 +668,16 @@ function endRound() {
         const p2Score = score;
         
         let msg = "";
-        let color = "";
-        if (p1Score > p2Score) msg = "WINNER: PLAYER 1";
-        else if (p2Score > p1Score) msg = "WINNER: PLAYER 2";
-        else msg = "DRAW!";
+        
+        if (playVsAI) {
+            if (p1Score > p2Score) msg = "WINNER: PLAYER";
+            else if (p2Score > p1Score) msg = "WINNER: AI";
+            else msg = "DRAW!";
+        } else {
+            if (p1Score > p2Score) msg = "WINNER: PLAYER 1";
+            else if (p2Score > p1Score) msg = "WINNER: PLAYER 2";
+            else msg = "DRAW!";
+        }
         
         showOverlay("MATCH RESULT", msg, "NEW MATCH");
     }
@@ -355,7 +697,8 @@ function nextRoundOrReset() {
 
 function handleInput(e) {
     if (!isRoundActive) return;
-    
+    if (playVsAI && turnRole === aiRole && aiThinking) return;
+
     // Coordinates
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
@@ -363,19 +706,19 @@ function handleInput(e) {
     
     // Find closest node
     let closestV = -1;
-    let minD = cellSize * 0.45; // Hit radius
+    let minD = cellSize * 0.45; 
+    let bestDist = minD;
     
     for (let i = 0; i < N * N; i++) {
         const p = getCoord(i);
         const dist = Math.sqrt((p.x - x)**2 + (p.y - y)**2);
-        if (dist < minD) {
+        if (dist < bestDist) {
+            bestDist = dist;
             closestV = i;
-            break;
         }
     }
     
     if (closestV === -1) {
-        // Tapping empty space closes menu
         closeMenu();
         return;
     }
@@ -392,12 +735,10 @@ function processMove(v) {
             startPick = v;
             draw(); // Highlight start pick
         } else {
-            // Check adjacency
             if (getNeighbors(startPick).includes(v)) {
                 executeMove([startPick, v], 'Hunter');
                 startPick = null;
             } else {
-                // Changed mind, picked new start
                 startPick = v; 
                 draw();
             }
@@ -413,10 +754,9 @@ function processMove(v) {
     const canHead = neighbors.includes(head);
     const canTail = neighbors.includes(tail);
 
-    if (!canHead && !canTail) return; // Not connected
+    if (!canHead && !canTail) return; 
 
     if (canHead && canTail) {
-        // Ambiguous move
         openChoiceMenu(v);
     } else if (canHead) {
         executeExtension(v, 'head');
@@ -431,12 +771,6 @@ function openChoiceMenu(v) {
     const menu = document.getElementById('choiceMenu');
     
     // Position menu above the node
-    // canvas coordinate to CSS coordinate
-    // Since canvas is 100% of container, roughly maps 1:1 if dpr handled
-    const rect = canvas.getBoundingClientRect();
-    const scale = rect.width / canvas.width * dpr; // Should be 1 typically with this setup
-    
-    // Using percentages relative to container
     const xPct = (coords.x / (canvas.width / dpr)) * 100;
     const yPct = (coords.y / (canvas.height / dpr)) * 100;
 
@@ -468,6 +802,11 @@ function executeExtension(v, end) {
         path.push(v);
     }
     used.add(v);
+    
+    // Record who played this node
+    nodeData[v] = { role: turnRole, turn: moveCount };
+    moveCount++;
+    
     finishTurn();
 }
 
@@ -475,23 +814,33 @@ function executeMove(newPath, nextRole) {
     saveState();
     path = newPath;
     newPath.forEach(n => used.add(n));
+    
+    // Initial Move: Both nodes belong to Snake
+    nodeData[newPath[0]] = { role: 'Snake', turn: 0 };
+    nodeData[newPath[1]] = { role: 'Snake', turn: 0 };
+    moveCount = 1; // 1 move used
+    
     finishTurn();
 }
 
 function finishTurn() {
-    // Switch role
     turnRole = turnRole === 'Snake' ? 'Hunter' : 'Snake';
     checkGameState();
     updateUI();
     draw();
+
+    // Trigger AI if it's AI's turn
+    maybeAIMove();
 }
 
 function saveState() {
     history.push({
         path: [...path],
         used: new Set(used),
+        nodeData: { ...nodeData }, // Clone object
         turnRole: turnRole,
-        startPick: startPick
+        startPick: startPick,
+        moveCount: moveCount
     });
 }
 
@@ -500,8 +849,11 @@ function undoMove() {
     const state = history.pop();
     path = state.path;
     used = state.used;
+    nodeData = state.nodeData;
     turnRole = state.turnRole;
     startPick = state.startPick;
+    moveCount = state.moveCount;
+    
     isRoundActive = true;
     hideOverlay();
     closeMenu();
@@ -514,14 +866,27 @@ function undoMove() {
 function updateUI() {
     const snakePlayer = getSnakePlayer();
     const hunterPlayer = getHunterPlayer();
-    const currentPlayer = turnRole === 'Snake' ? snakePlayer : hunterPlayer;
     
     const turnEl = document.getElementById('turnIndicator');
+    
+    // Customize text based on mode
+    let snakeText = `SNAKE (P${snakePlayer})`;
+    let hunterText = `HUNTER (P${hunterPlayer})`;
+
+    if (playVsAI) {
+        // Player is P1, AI is P2
+        if (turnRole === 'Snake') {
+             snakeText = (snakePlayer === 1) ? "SNAKE (YOU)" : "SNAKE (AI)";
+        } else {
+             hunterText = (hunterPlayer === 1) ? "HUNTER (YOU)" : "HUNTER (AI)";
+        }
+    }
+
     if (turnRole === 'Snake') {
-        turnEl.textContent = `SNAKE (P${snakePlayer})`;
+        turnEl.textContent = snakeText;
         turnEl.className = "px-2 py-0.5 rounded text-xs font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30";
     } else {
-        turnEl.textContent = `HUNTER (P${hunterPlayer})`;
+        turnEl.textContent = hunterText;
         turnEl.className = "px-2 py-0.5 rounded text-xs font-bold bg-pink-500/20 text-pink-300 border border-pink-500/30";
     }
     
@@ -549,8 +914,8 @@ function hideOverlay() {
 // --- Rendering ---
 
 function draw() {
-    // Clear
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // Clear - using logical size since we scaled, or clear physical
+    ctx.clearRect(0, 0, canvasSize, canvasSize);
     
     // Draw Grid Lines
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
@@ -590,26 +955,44 @@ function draw() {
         }
     }
 
-    // Draw Path (Glow Effect)
+    // Draw Path Segments (Colored by Creator)
     if (path.length > 1) {
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
-        ctx.shadowBlur = 15;
-        ctx.shadowColor = '#00f3ff';
-        
+        ctx.shadowBlur = 10;
         ctx.lineWidth = cellSize * 0.15;
-        ctx.strokeStyle = '#00f3ff';
-        
-        ctx.beginPath();
-        const start = getCoord(path[0]);
-        ctx.moveTo(start.x, start.y);
-        for(let i=1; i<path.length; i++) {
-            const p = getCoord(path[i]);
-            ctx.lineTo(p.x, p.y);
+
+        for (let i = 0; i < path.length - 1; i++) {
+            const u = path[i];
+            const v = path[i+1];
+            const p1 = getCoord(u);
+            const p2 = getCoord(v);
+            
+            // Determine who created this segment
+            // The segment belongs to the node that was added LATER (higher turn number)
+            const dataU = nodeData[u];
+            const dataV = nodeData[v];
+            
+            let color = COLOR_SNAKE; // Default
+            if (dataU && dataV) {
+                // If both are turn 0 (init), it's Snake.
+                // Otherwise, use the role of the higher turn number.
+                if (dataU.turn > dataV.turn) {
+                    color = dataU.role === 'Snake' ? COLOR_SNAKE : COLOR_HUNTER;
+                } else {
+                    color = dataV.role === 'Snake' ? COLOR_SNAKE : COLOR_HUNTER;
+                }
+            }
+
+            ctx.beginPath();
+            ctx.strokeStyle = color;
+            ctx.shadowColor = color;
+            ctx.moveTo(p1.x, p1.y);
+            ctx.lineTo(p2.x, p2.y);
+            ctx.stroke();
         }
-        ctx.stroke();
         
-        ctx.shadowBlur = 0; // Reset shadow for nodes
+        ctx.shadowBlur = 0;
     }
 
     // Draw Nodes
@@ -625,14 +1008,18 @@ function draw() {
         if (isEndpoint) {
             // Endpoints: Bigger, Different Color
             ctx.arc(p.x, p.y, cellSize * 0.2, 0, Math.PI * 2);
-            ctx.fillStyle = '#ff00ff'; // Neon Pink
-            ctx.shadowColor = '#ff00ff';
+            ctx.fillStyle = '#ffffff'; 
+            ctx.shadowColor = '#ffffff';
             ctx.shadowBlur = 10;
         } else if (isUsed) {
-            // Used nodes (body)
+            // Used nodes (body) - Color based on who placed them
+            const data = nodeData[i];
+            const color = (data && data.role === 'Hunter') ? COLOR_HUNTER : COLOR_SNAKE;
+            
             ctx.arc(p.x, p.y, cellSize * 0.1, 0, Math.PI * 2);
-            ctx.fillStyle = '#00f3ff'; // Neon Blue
-            ctx.shadowBlur = 0;
+            ctx.fillStyle = color;
+            ctx.shadowColor = color;
+            ctx.shadowBlur = 5;
         } else if (isStartPick) {
             // First selected point
             ctx.arc(p.x, p.y, cellSize * 0.2, 0, Math.PI * 2);
@@ -657,8 +1044,12 @@ function draw() {
     }
     
     // Animate hints loop
+    if (rafId) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+    }
     if (isRoundActive) {
-        requestAnimationFrame(draw);
+        rafId = requestAnimationFrame(draw);
     }
 }
 
